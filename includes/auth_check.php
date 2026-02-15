@@ -1,128 +1,121 @@
 <?php
 /**
- * includes/auth_check.php
- * Session guard for protected pages. Include at top of pages requiring login.
- * Works for both student and admin roles.
+ * includes/auth_check.php — Authentication & Session Handler
+ * Include this at the top of protected pages
  */
 
 declare(strict_types=1);
 
-// Start session if not already started
+// Prevent direct access
+if (!defined('DB_HOST')) {
+    require_once __DIR__ . '/../config.php';
+}
+
+require_once __DIR__ . '/db.php';
+require_once __DIR__ . '/functions.php';
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  START SESSION (if not already started)
+// ═══════════════════════════════════════════════════════════════════════════
+
 if (session_status() === PHP_SESSION_NONE) {
+    // Secure session configuration
+    ini_set('session.cookie_httponly', '1');
+    ini_set('session.cookie_secure', ENVIRONMENT === 'production' ? '1' : '0');
+    ini_set('session.use_strict_mode', '1');
+    ini_set('session.cookie_samesite', 'Lax');
+    
     session_start();
 }
 
-$_rootDir = dirname(__DIR__);
+// ═══════════════════════════════════════════════════════════════════════════
+//  CHECK IF USER IS LOGGED IN
+// ═══════════════════════════════════════════════════════════════════════════
 
-if (!defined('DB_HOST'))              require_once $_rootDir . '/config.php';
-if (!function_exists('db_row'))       require_once $_rootDir . '/includes/db.php';
-if (!function_exists('t'))            require_once $_rootDir . '/includes/functions.php';
-if (!function_exists('getCsrfToken')) require_once $_rootDir . '/includes/csrf.php';
-
-// ══════════════════════════════════════════════════════════════════════════
-// 1. CHECK IF USER IS LOGGED IN
-// ══════════════════════════════════════════════════════════════════════════
-
-if (empty($_SESSION['user_id'])) {
-    // Not logged in - redirect to login with return URL
-    $returnUrl = $_SERVER['REQUEST_URI'] ?? '/dashboard.php';
-    header('Location: ' . SITE_URL . '/login.php?redirect=' . urlencode($returnUrl), true, 302);
-    exit;
+if (!isLoggedIn()) {
+    // Store attempted URL for redirect after login
+    $_SESSION['redirect_after_login'] = $_SERVER['REQUEST_URI'] ?? '/dashboard.php';
+    
+    // Redirect to login
+    redirect(SITE_URL . '/login.php');
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// 2. VERIFY USER EXISTS AND IS ACTIVE
-// ══════════════════════════════════════════════════════════════════════════
+// ═══════════════════════════════════════════════════════════════════════════
+//  FETCH CURRENT USER DATA (refresh from database)
+// ═══════════════════════════════════════════════════════════════════════════
 
-try {
-    $currentUser = db_row(
-        "SELECT id, username, email, full_name, role, level_id,
-                xp_points, current_level, preferred_lang, is_active,
-                profile_picture, last_login, created_at
-         FROM   users
-         WHERE  id = ?
-         LIMIT  1",
-        [(int) $_SESSION['user_id']]
-    );
-} catch (Exception $e) {
-    error_log('Auth check failed: ' . $e->getMessage());
-    $currentUser = null;
-}
+$currentUser = getCurrentUser();
 
-// User not found or inactive
-if (!$currentUser || !(bool) $currentUser['is_active']) {
-    session_unset();
+if (!$currentUser) {
+    // User not found in database - destroy session and redirect
     session_destroy();
-    
-    header('Location: ' . SITE_URL . '/login.php?error=disabled', true, 302);
-    exit;
+    redirect(SITE_URL . '/login.php');
 }
 
-// ══════════════════════════════════════════════════════════════════════════
-// 3. SYNC SESSION DATA
-// ══════════════════════════════════════════════════════════════════════════
+// Check if user is active
+if (empty($currentUser['is_active'])) {
+    session_destroy();
+    setFlashMessage('error', 'Your account has been deactivated. Please contact support.');
+    redirect(SITE_URL . '/login.php');
+}
 
-// Update session with fresh data
+// ═══════════════════════════════════════════════════════════════════════════
+//  SESSION HIJACKING PREVENTION
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Store user agent on first visit
+if (empty($_SESSION['user_agent'])) {
+    $_SESSION['user_agent'] = $_SERVER['HTTP_USER_AGENT'] ?? '';
+}
+
+// Verify user agent hasn't changed (basic hijacking detection)
+if (($_SESSION['user_agent'] ?? '') !== ($_SERVER['HTTP_USER_AGENT'] ?? '')) {
+    session_destroy();
+    redirect(SITE_URL . '/login.php');
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  SESSION REGENERATION (every 30 minutes)
+// ═══════════════════════════════════════════════════════════════════════════
+
+if (empty($_SESSION['last_regeneration'])) {
+    $_SESSION['last_regeneration'] = time();
+} elseif (time() - $_SESSION['last_regeneration'] > 1800) { // 30 minutes
+    session_regenerate_id(true);
+    $_SESSION['last_regeneration'] = time();
+}
+
+// ═══════════════════════════════════════════════════════════════════════════
+//  UPDATE SESSION WITH FRESH DATA
+// ═══════════════════════════════════════════════════════════════════════════
+
+// Keep session data synced with database
+$_SESSION['user_id']    = $currentUser['id'];
 $_SESSION['username']   = $currentUser['username'];
-$_SESSION['full_name']  = $currentUser['full_name'];
 $_SESSION['user_role']  = $currentUser['role'];
+$_SESSION['full_name']  = $currentUser['full_name'];
 $_SESSION['level_id']   = $currentUser['level_id'];
-$_SESSION['xp_points']  = $currentUser['xp_points'];
+$_SESSION['lang']       = $currentUser['preferred_lang'] ?? 'fr';
 
-// ══════════════════════════════════════════════════════════════════════════
-// 4. LANGUAGE HANDLING
-// ══════════════════════════════════════════════════════════════════════════
+// Make current user available to all pages
+$GLOBALS['currentUser'] = $currentUser;
 
-// Set language from user preference if not set
-if (empty($_SESSION['lang'])) {
-    $_SESSION['lang'] = $currentUser['preferred_lang'] ?? 'fr';
-}
+// ═══════════════════════════════════════════════════════════════════════════
+//  ACTIVITY LOGGING (optional)
+// ═══════════════════════════════════════════════════════════════════════════
 
-// Allow language switching via URL parameter
-if (isset($_GET['lang']) && in_array($_GET['lang'], ['ar', 'fr', 'en'], true)) {
-    $_SESSION['lang'] = $_GET['lang'];
+// Log last activity time (for "online users" feature, idle timeout, etc.)
+if (empty($_SESSION['last_activity'])) {
+    $_SESSION['last_activity'] = time();
+} else {
+    $idleTime = time() - $_SESSION['last_activity'];
     
-    // Update user's preferred language in database
-    try {
-        db_execute(
-            "UPDATE users SET preferred_lang = ? WHERE id = ?",
-            [$_GET['lang'], (int) $_SESSION['user_id']]
-        );
-    } catch (Exception $e) {
-        error_log('Language update failed: ' . $e->getMessage());
+    // Auto-logout after 2 hours of inactivity (optional)
+    if ($idleTime > 7200) {
+        session_destroy();
+        setFlashMessage('info', 'Session expired due to inactivity. Please login again.');
+        redirect(SITE_URL . '/login.php');
     }
+    
+    $_SESSION['last_activity'] = time();
 }
-
-// ══════════════════════════════════════════════════════════════════════════
-// 5. SET GLOBAL CONVENIENCE VARIABLES
-// ══════════════════════════════════════════════════════════════════════════
-
-$currentLang = getCurrentLang();
-$dir         = getDirection();
-$isRtl       = ($dir === 'rtl');
-$csrfToken   = getCsrfToken();
-
-// User role helpers
-$isAdmin   = ($currentUser['role'] === 'admin' || $currentUser['role'] === 'super_admin');
-$isStudent = ($currentUser['role'] === 'student');
-
-// ══════════════════════════════════════════════════════════════════════════
-// 6. OPTIONAL: UPDATE LAST SEEN (throttled to once per 5 minutes)
-// ══════════════════════════════════════════════════════════════════════════
-
-$lastSeenKey = 'last_seen_update_' . $_SESSION['user_id'];
-if (!isset($_SESSION[$lastSeenKey]) || (time() - $_SESSION[$lastSeenKey]) > 300) {
-    try {
-        db_execute(
-            "UPDATE users SET last_login = NOW() WHERE id = ?",
-            [(int) $_SESSION['user_id']]
-        );
-        $_SESSION[$lastSeenKey] = time();
-    } catch (Exception $e) {
-        error_log('Last seen update failed: ' . $e->getMessage());
-    }
-}
-
-// ══════════════════════════════════════════════════════════════════════════
-// AUTHENTICATION COMPLETE - USER IS VERIFIED AND ACTIVE
-// ══════════════════════════════════════════════════════════════════════════

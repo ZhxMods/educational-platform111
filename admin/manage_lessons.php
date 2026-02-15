@@ -1,547 +1,813 @@
 <?php
 /**
- * admin/manage_lessons.php — Lesson CMS with Live URL Preview
+ * admin/manage_lessons.php — Lesson Management with FIXED AJAX
+ * FIXED: POST handler processes all fields (AR/FR/EN titles, URLs)
+ * ADDED: Live YouTube/MediaFire preview
  */
+
 declare(strict_types=1);
-require_once __DIR__ . '/../includes/admin_auth.php';
 
-// ── Handle POST actions ───────────────────────────────────────
-if ($_SERVER['REQUEST_METHOD'] === 'POST') {
-    header('Content-Type: application/json');
-    adminVerifyCsrf();
+require_once __DIR__ . '/../config.php';
+require_once __DIR__ . '/../includes/db.php';
+require_once __DIR__ . '/../includes/functions.php';
 
-    $action = $_POST['action'] ?? '';
+// Start session if not started
+if (session_status() === PHP_SESSION_NONE) {
+    session_start();
+}
 
-    // ── ADD or EDIT lesson ───────────────────────────────────
-    if ($action === 'save_lesson') {
-        $id          = (int) ($_POST['lesson_id'] ?? 0);
-        $subject_id  = (int) ($_POST['subject_id'] ?? 0);
-        $type        = in_array($_POST['content_type'] ?? '', ['video','pdf','book']) ? $_POST['content_type'] : 'video';
-        $url         = trim($_POST['url'] ?? '');
-        $order       = (int) ($_POST['display_order'] ?? 0);
-        $xp          = max(1, (int) ($_POST['xp_reward'] ?? 10));
-        $duration    = (int) ($_POST['duration_minutes'] ?? 0);
-        $published   = isset($_POST['is_published']) ? 1 : 0;
+requireRole(['admin', 'super_admin']);
 
-        $title_ar = trim($_POST['title_ar'] ?? '');
-        $title_fr = trim($_POST['title_fr'] ?? '');
-        $title_en = trim($_POST['title_en'] ?? '');
-        $desc_ar  = trim($_POST['desc_ar']  ?? '');
-        $desc_fr  = trim($_POST['desc_fr']  ?? '');
-        $desc_en  = trim($_POST['desc_en']  ?? '');
+$currentLang = getCurrentLang();
+$dir         = getDirection();
+$isRtl       = $dir === 'rtl';
 
-        if (!$subject_id || !$url || !$title_ar) {
-            echo json_encode(['success' => false, 'message' => 'Subject, URL and Arabic title are required.']);
+// ═══════════════════════════════════════════════════════════════════════════
+//  AJAX HANDLERS (FIXED: Now processes all fields correctly)
+// ═══════════════════════════════════════════════════════════════════════════
+
+if ($_SERVER['REQUEST_METHOD'] === 'POST' && !empty($_POST['ajax_action'])) {
+    header('Content-Type: application/json; charset=UTF-8');
+    
+    // CSRF validation
+    if (!verifyCsrfToken($_POST['csrf_token'] ?? '')) {
+        http_response_code(403);
+        echo json_encode(['success' => false, 'message' => 'Invalid CSRF token']);
+        exit;
+    }
+    
+    $action = $_POST['ajax_action'];
+    
+    // ───────────────────────────────────────────────────────────────────────
+    //  ADD LESSON
+    // ───────────────────────────────────────────────────────────────────────
+    if ($action === 'add_lesson') {
+        $subjectId    = (int) ($_POST['subject_id'] ?? 0);
+        $titleAr      = trim($_POST['title_ar'] ?? '');
+        $titleFr      = trim($_POST['title_fr'] ?? '');
+        $titleEn      = trim($_POST['title_en'] ?? '');
+        $descAr       = trim($_POST['description_ar'] ?? '');
+        $descFr       = trim($_POST['description_fr'] ?? '');
+        $descEn       = trim($_POST['description_en'] ?? '');
+        $contentType  = trim($_POST['content_type'] ?? 'video');
+        $url          = trim($_POST['url'] ?? '');
+        $duration     = (int) ($_POST['duration_minutes'] ?? 0);
+        $xpReward     = (int) ($_POST['xp_reward'] ?? 10);
+        $isPublished  = !empty($_POST['is_published']) ? 1 : 0;
+        $displayOrder = (int) ($_POST['display_order'] ?? 0);
+        
+        // Validation
+        if ($subjectId <= 0 || empty($titleAr) || empty($url)) {
+            echo json_encode(['success' => false, 'message' => 'Required fields missing']);
             exit;
         }
-
-        if ($id > 0) {
-            // Update
-            db_run(
-                "UPDATE lessons SET
-                    subject_id=?, content_type=?, url=?, display_order=?,
-                    xp_reward=?, duration_minutes=?, is_published=?,
-                    title_ar=?, title_fr=?, title_en=?,
-                    description_ar=?, description_fr=?, description_en=?
-                 WHERE id=?",
-                [$subject_id,$type,$url,$order,$xp,$duration,$published,
-                 $title_ar,$title_fr,$title_en,$desc_ar,$desc_fr,$desc_en,$id]
+        
+        // If display_order not set, get max + 1
+        if ($displayOrder === 0) {
+            $maxOrder = (int) db_value(
+                'SELECT COALESCE(MAX(display_order), 0) FROM lessons WHERE subject_id = ?',
+                [$subjectId]
             );
-            echo json_encode(['success' => true, 'message' => 'Lesson updated successfully.']);
+            $displayOrder = $maxOrder + 1;
+        }
+        
+        // Insert
+        $sql = "INSERT INTO lessons 
+                (subject_id, title_ar, title_fr, title_en, 
+                 description_ar, description_fr, description_en,
+                 content_type, url, duration_minutes, xp_reward,
+                 is_published, display_order, created_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, NOW())";
+        
+        $success = db_run($sql, [
+            $subjectId, $titleAr, $titleFr, $titleEn,
+            $descAr, $descFr, $descEn,
+            $contentType, $url, $duration, $xpReward,
+            $isPublished, $displayOrder
+        ]);
+        
+        if ($success) {
+            $lessonId = db_last_id();
+            echo json_encode([
+                'success' => true,
+                'message' => 'Lesson added successfully',
+                'lesson_id' => $lessonId
+            ]);
         } else {
-            // Insert
-            db_run(
-                "INSERT INTO lessons
-                    (subject_id,content_type,url,display_order,xp_reward,duration_minutes,
-                     is_published,title_ar,title_fr,title_en,
-                     description_ar,description_fr,description_en,created_by)
-                 VALUES (?,?,?,?,?,?,?,?,?,?,?,?,?,?)",
-                [$subject_id,$type,$url,$order,$xp,$duration,$published,
-                 $title_ar,$title_fr,$title_en,$desc_ar,$desc_fr,$desc_en,
-                 (int)$adminUser['id']]
-            );
-            echo json_encode(['success' => true, 'message' => 'Lesson created successfully.']);
+            echo json_encode(['success' => false, 'message' => 'Database error']);
         }
         exit;
     }
-
-    // ── DELETE lesson ────────────────────────────────────────
+    
+    // ───────────────────────────────────────────────────────────────────────
+    //  EDIT LESSON (FIXED: All fields processed)
+    // ───────────────────────────────────────────────────────────────────────
+    if ($action === 'edit_lesson') {
+        $lessonId     = (int) ($_POST['lesson_id'] ?? 0);
+        $subjectId    = (int) ($_POST['subject_id'] ?? 0);
+        $titleAr      = trim($_POST['title_ar'] ?? '');
+        $titleFr      = trim($_POST['title_fr'] ?? '');
+        $titleEn      = trim($_POST['title_en'] ?? '');
+        $descAr       = trim($_POST['description_ar'] ?? '');
+        $descFr       = trim($_POST['description_fr'] ?? '');
+        $descEn       = trim($_POST['description_en'] ?? '');
+        $contentType  = trim($_POST['content_type'] ?? 'video');
+        $url          = trim($_POST['url'] ?? '');
+        $duration     = (int) ($_POST['duration_minutes'] ?? 0);
+        $xpReward     = (int) ($_POST['xp_reward'] ?? 10);
+        $isPublished  = !empty($_POST['is_published']) ? 1 : 0;
+        $displayOrder = (int) ($_POST['display_order'] ?? 0);
+        
+        if ($lessonId <= 0 || $subjectId <= 0 || empty($titleAr) || empty($url)) {
+            echo json_encode(['success' => false, 'message' => 'Required fields missing']);
+            exit;
+        }
+        
+        $sql = "UPDATE lessons SET
+                subject_id = ?, title_ar = ?, title_fr = ?, title_en = ?,
+                description_ar = ?, description_fr = ?, description_en = ?,
+                content_type = ?, url = ?, duration_minutes = ?, xp_reward = ?,
+                is_published = ?, display_order = ?, updated_at = NOW()
+                WHERE id = ?";
+        
+        $success = db_run($sql, [
+            $subjectId, $titleAr, $titleFr, $titleEn,
+            $descAr, $descFr, $descEn,
+            $contentType, $url, $duration, $xpReward,
+            $isPublished, $displayOrder, $lessonId
+        ]);
+        
+        echo json_encode([
+            'success' => $success,
+            'message' => $success ? 'Lesson updated successfully' : 'Database error'
+        ]);
+        exit;
+    }
+    
+    // ───────────────────────────────────────────────────────────────────────
+    //  DELETE LESSON
+    // ───────────────────────────────────────────────────────────────────────
     if ($action === 'delete_lesson') {
-        $id = (int) ($_POST['lesson_id'] ?? 0);
-        if ($id > 0) {
-            db_run('DELETE FROM lessons WHERE id = ?', [$id]);
-            echo json_encode(['success' => true, 'message' => 'Lesson deleted.']);
-        } else {
-            echo json_encode(['success' => false, 'message' => 'Invalid ID.']);
+        $lessonId = (int) ($_POST['lesson_id'] ?? 0);
+        
+        if ($lessonId <= 0) {
+            echo json_encode(['success' => false, 'message' => 'Invalid lesson ID']);
+            exit;
         }
+        
+        // Delete related progress first
+        db_run('DELETE FROM lesson_progress WHERE lesson_id = ?', [$lessonId]);
+        
+        // Delete lesson
+        $success = db_run('DELETE FROM lessons WHERE id = ?', [$lessonId]);
+        
+        echo json_encode([
+            'success' => $success,
+            'message' => $success ? 'Lesson deleted successfully' : 'Database error'
+        ]);
         exit;
     }
-
-    // ── GET lesson for edit ──────────────────────────────────
-    if ($action === 'get_lesson') {
-        $id = (int) ($_POST['lesson_id'] ?? 0);
-        $lesson = db_row('SELECT * FROM lessons WHERE id = ?', [$id]);
-        echo json_encode(['success' => (bool)$lesson, 'lesson' => $lesson]);
+    
+    // ───────────────────────────────────────────────────────────────────────
+    //  TOGGLE PUBLISH STATUS
+    // ───────────────────────────────────────────────────────────────────────
+    if ($action === 'toggle_publish') {
+        $lessonId = (int) ($_POST['lesson_id'] ?? 0);
+        
+        if ($lessonId <= 0) {
+            echo json_encode(['success' => false, 'message' => 'Invalid lesson ID']);
+            exit;
+        }
+        
+        $current = (int) db_value('SELECT is_published FROM lessons WHERE id = ?', [$lessonId]);
+        $newStatus = $current === 1 ? 0 : 1;
+        
+        $success = db_run('UPDATE lessons SET is_published = ? WHERE id = ?', [$newStatus, $lessonId]);
+        
+        echo json_encode([
+            'success' => $success,
+            'new_status' => $newStatus,
+            'message' => $success ? 'Status updated' : 'Database error'
+        ]);
         exit;
     }
-
-    echo json_encode(['success' => false, 'message' => 'Unknown action.']);
+    
+    // Unknown action
+    echo json_encode(['success' => false, 'message' => 'Unknown action']);
     exit;
 }
 
-// ── Fetch data for display ────────────────────────────────────
-$lessons = db_all(
-    "SELECT l.*, s.name_{$currentLang} AS subject_name, s.level_id,
-            lv.name_{$currentLang} AS level_name
-     FROM   lessons  l
-     JOIN   subjects s  ON l.subject_id  = s.id
-     JOIN   levels   lv ON s.level_id    = lv.id
-     ORDER  BY lv.display_order, s.display_order, l.display_order"
-);
+// ═══════════════════════════════════════════════════════════════════════════
+//  FETCH DATA FOR PAGE RENDER
+// ═══════════════════════════════════════════════════════════════════════════
 
-$subjects = db_all(
-    "SELECT s.id, s.name_ar, s.name_fr, s.name_en,
-            lv.name_{$currentLang} AS level_name
-     FROM   subjects s
-     JOIN   levels   lv ON s.level_id = lv.id
-     ORDER  BY lv.display_order, s.display_order"
-);
+// Get all levels
+$levels = db_all('SELECT * FROM levels ORDER BY display_order ASC');
 
-$levels = db_all('SELECT * FROM levels ORDER BY display_order');
+// Get selected level (default to first)
+$selectedLevelId = (int) ($_GET['level_id'] ?? ($levels[0]['id'] ?? 0));
 
-$pageTitle  = 'Manage Lessons';
-$activePage = 'lessons';
-require_once '_layout.php';
+// Get subjects for selected level
+$subjects = $selectedLevelId
+    ? db_all('SELECT * FROM subjects WHERE level_id = ? ORDER BY display_order ASC', [$selectedLevelId])
+    : [];
+
+// Get selected subject (default to first)
+$selectedSubjectId = (int) ($_GET['subject_id'] ?? ($subjects[0]['id'] ?? 0));
+
+// Get lessons for selected subject
+$lessons = $selectedSubjectId
+    ? db_all(
+        "SELECT l.*, 
+                (SELECT COUNT(*) FROM lesson_progress lp WHERE lp.lesson_id = l.id AND lp.status = 'completed') AS completion_count
+         FROM lessons l 
+         WHERE l.subject_id = ? 
+         ORDER BY l.display_order ASC, l.created_at DESC",
+        [$selectedSubjectId]
+    )
+    : [];
+
+$pageTitle = 'Manage Lessons — Admin';
+$csrfToken = getCsrfToken();
 ?>
+<!DOCTYPE html>
+<html lang="<?php echo $currentLang; ?>" dir="<?php echo $dir; ?>">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title><?php echo $pageTitle; ?></title>
+  <meta name="csrf-token" content="<?php echo $csrfToken; ?>">
+  
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
+  <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
 
-<!-- Page Header -->
-<div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:1.5rem;flex-wrap:wrap;gap:.75rem;">
-  <div>
-    <h1 style="font-size:1.3rem;font-weight:800;color:var(--text-primary);">Lessons</h1>
-    <p style="font-size:.82rem;color:var(--text-muted);margin-top:.2rem;"><?php echo count($lessons); ?> total lessons</p>
+  <style>
+    :root {
+      --blue-900: #1e3a8a; --blue-700: #1d4ed8; --blue-500: #3b82f6;
+      --blue-100: #dbeafe; --blue-50: #eff6ff;
+      --white: #fff; --gray-50: #f8fafc; --gray-100: #f1f5f9;
+      --gray-200: #e2e8f0; --gray-500: #64748b; --gray-700: #334155;
+      --gray-900: #0f172a; --radius: 12px;
+    }
+    * { box-sizing: border-box; margin: 0; padding: 0; }
+    body {
+      font-family: 'Plus Jakarta Sans', sans-serif;
+      background: var(--gray-100); color: var(--gray-700);
+      padding: 1.5rem;
+    }
+
+    .container { max-width: 1400px; margin: 0 auto; }
+    
+    .page-header {
+      display: flex; align-items: center; justify-content: space-between;
+      margin-bottom: 1.5rem;
+    }
+    .page-header h1 { font-size: 1.5rem; font-weight: 700; color: var(--gray-900); }
+    .btn-back {
+      display: inline-flex; align-items: center; gap: .5rem;
+      padding: .6rem 1.1rem; background: var(--white);
+      border: 1px solid var(--gray-200); border-radius: 8px;
+      color: var(--gray-700); text-decoration: none; font-size: .875rem;
+      font-weight: 500; transition: all .15s;
+    }
+    .btn-back:hover { background: var(--blue-50); color: var(--blue-700); border-color: var(--blue-200); }
+
+    .filter-bar {
+      display: flex; gap: 1rem; margin-bottom: 1.5rem;
+      padding: 1.25rem; background: var(--white);
+      border-radius: var(--radius); box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    }
+    .filter-bar select {
+      flex: 1; padding: .6rem .85rem; border: 1px solid var(--gray-200);
+      border-radius: 8px; font-family: inherit; font-size: .875rem;
+      background: var(--white); color: var(--gray-700);
+    }
+
+    .actions-bar {
+      display: flex; justify-content: flex-end; margin-bottom: 1rem;
+    }
+    .btn-add {
+      display: inline-flex; align-items: center; gap: .5rem;
+      padding: .7rem 1.3rem; background: var(--blue-700);
+      color: #fff; border: none; border-radius: 8px;
+      font-family: inherit; font-size: .875rem; font-weight: 600;
+      cursor: pointer; transition: background .15s;
+    }
+    .btn-add:hover { background: var(--blue-900); }
+
+    .lessons-table {
+      background: var(--white); border-radius: var(--radius);
+      overflow: hidden; box-shadow: 0 1px 3px rgba(0,0,0,.05);
+    }
+    table { width: 100%; border-collapse: collapse; }
+    thead { background: var(--gray-50); }
+    th, td { padding: .85rem 1rem; text-align: left; font-size: .875rem; }
+    th { font-weight: 600; color: var(--gray-700); border-bottom: 1px solid var(--gray-200); }
+    tbody tr { border-bottom: 1px solid var(--gray-100); transition: background .15s; }
+    tbody tr:hover { background: var(--blue-50); }
+
+    .lesson-title { font-weight: 600; color: var(--gray-900); }
+    .lesson-meta { font-size: .78rem; color: var(--gray-500); margin-top: .2rem; }
+    
+    .badge {
+      display: inline-flex; align-items: center; gap: .3rem;
+      padding: .2rem .6rem; border-radius: 50px;
+      font-size: .72rem; font-weight: 600;
+    }
+    .badge.published { background: #f0fdf4; color: #16a34a; }
+    .badge.draft { background: #fef3c7; color: #ca8a04; }
+    .badge.video { background: #dbeafe; color: #1d4ed8; }
+    .badge.pdf { background: #fee2e2; color: #dc2626; }
+    .badge.book { background: #dcfce7; color: #16a34a; }
+
+    .actions {
+      display: flex; align-items: center; gap: .5rem;
+    }
+    .icon-btn {
+      width: 32px; height: 32px; border: none; background: none;
+      display: flex; align-items: center; justify-content: center;
+      border-radius: 6px; cursor: pointer; transition: background .15s;
+    }
+    .icon-btn:hover { background: var(--gray-100); }
+    .icon-btn.danger:hover { background: #fee2e2; color: #dc2626; }
+
+    .empty-state {
+      text-align: center; padding: 3rem 1rem; color: var(--gray-400);
+    }
+
+    /* Modal */
+    .modal-overlay {
+      display: none; position: fixed; inset: 0; background: rgba(0,0,0,.5);
+      z-index: 1000; backdrop-filter: blur(2px);
+    }
+    .modal-overlay.open { display: flex; align-items: center; justify-content: center; }
+    .modal {
+      background: var(--white); border-radius: var(--radius);
+      width: 90%; max-width: 700px; max-height: 90vh;
+      overflow-y: auto; box-shadow: 0 20px 60px rgba(0,0,0,.3);
+    }
+    .modal-header {
+      padding: 1.25rem 1.5rem; border-bottom: 1px solid var(--gray-200);
+      display: flex; align-items: center; justify-content: space-between;
+    }
+    .modal-header h3 { font-size: 1.1rem; font-weight: 700; color: var(--gray-900); }
+    .modal-close {
+      background: none; border: none; cursor: pointer;
+      width: 32px; height: 32px; display: flex; align-items: center; justify-content: center;
+      border-radius: 6px; transition: background .15s;
+    }
+    .modal-close:hover { background: var(--gray-100); }
+    .modal-body { padding: 1.5rem; }
+    
+    .form-group { margin-bottom: 1.25rem; }
+    .form-group label {
+      display: block; font-size: .85rem; font-weight: 600;
+      color: var(--gray-700); margin-bottom: .4rem;
+    }
+    .form-group input, .form-group select, .form-group textarea {
+      width: 100%; padding: .65rem .85rem; border: 1px solid var(--gray-200);
+      border-radius: 8px; font-family: inherit; font-size: .875rem;
+      background: var(--white); color: var(--gray-700);
+    }
+    .form-group textarea { min-height: 80px; resize: vertical; }
+    
+    .form-row { display: grid; grid-template-columns: 1fr 1fr; gap: 1rem; }
+    
+    .checkbox-group {
+      display: flex; align-items: center; gap: .5rem;
+      padding: .75rem; background: var(--gray-50); border-radius: 8px;
+    }
+    .checkbox-group input[type="checkbox"] { width: auto; }
+
+    .modal-footer {
+      padding: 1rem 1.5rem; border-top: 1px solid var(--gray-200);
+      display: flex; justify-content: flex-end; gap: .75rem;
+    }
+    .btn {
+      padding: .65rem 1.3rem; border: none; border-radius: 8px;
+      font-family: inherit; font-size: .875rem; font-weight: 600;
+      cursor: pointer; transition: all .15s;
+    }
+    .btn-primary { background: var(--blue-700); color: #fff; }
+    .btn-primary:hover { background: var(--blue-900); }
+    .btn-secondary { background: var(--gray-100); color: var(--gray-700); }
+    .btn-secondary:hover { background: var(--gray-200); }
+
+    /* ADDED: Live preview box */
+    .preview-box {
+      margin-top: .75rem; padding: 1rem; background: var(--gray-50);
+      border-radius: 8px; border: 1px solid var(--gray-200);
+    }
+    .preview-box iframe {
+      width: 100%; height: 240px; border: none; border-radius: 6px;
+    }
+    .preview-link {
+      display: flex; align-items: center; gap: .5rem;
+      color: var(--blue-700); text-decoration: none; font-size: .875rem;
+    }
+    .preview-link:hover { text-decoration: underline; }
+  </style>
+</head>
+<body>
+
+<div class="container">
+  <!-- Page Header -->
+  <div class="page-header">
+    <h1>📚 Manage Lessons</h1>
+    <a href="dashboard.php" class="btn-back">
+      <i data-lucide="arrow-left" width="16" height="16"></i>
+      Back to Dashboard
+    </a>
   </div>
-  <button class="btn btn-primary" onclick="openModal('lessonModal')">
-    <i data-lucide="plus" width="15" height="15"></i> Add Lesson
-  </button>
-</div>
 
-<!-- Lessons Table -->
-<div class="section-card">
-  <div class="section-card-body" style="padding:0;">
-    <div style="overflow-x:auto;">
-      <table id="lessonsTable" class="table table-hover mb-0" style="width:100%;">
-        <thead>
-          <tr>
-            <th>#</th>
-            <th>Title</th>
-            <th>Subject</th>
-            <th>Level</th>
-            <th>Type</th>
-            <th>XP</th>
-            <th>Order</th>
-            <th>Status</th>
-            <th style="width:100px;">Actions</th>
-          </tr>
-        </thead>
-        <tbody>
-          <?php foreach ($lessons as $row): ?>
-          <tr data-id="<?php echo (int)$row['id']; ?>">
-            <td><?php echo (int)$row['id']; ?></td>
-            <td>
-              <div style="font-weight:600;font-size:.85rem;"><?php echo htmlspecialchars($row['title_' . $currentLang] ?: $row['title_ar']); ?></div>
-              <div style="font-size:.72rem;color:var(--text-muted);max-width:220px;white-space:nowrap;overflow:hidden;text-overflow:ellipsis;"><?php echo htmlspecialchars($row['url']); ?></div>
-            </td>
-            <td><?php echo htmlspecialchars($row['subject_name']); ?></td>
-            <td><?php echo htmlspecialchars($row['level_name']); ?></td>
-            <td>
-              <span class="badge-status badge-<?php echo $row['content_type']; ?>">
-                <?php echo ucfirst($row['content_type']); ?>
-              </span>
-            </td>
-            <td><strong><?php echo (int)$row['xp_reward']; ?></strong></td>
-            <td><?php echo (int)$row['display_order']; ?></td>
-            <td>
-              <span class="badge-status <?php echo $row['is_published'] ? 'badge-active' : 'badge-inactive'; ?>">
-                <?php echo $row['is_published'] ? 'Published' : 'Draft'; ?>
-              </span>
-            </td>
-            <td>
-              <div style="display:flex;gap:.35rem;">
-                <button class="btn btn-ghost btn-sm btn-icon" onclick="editLesson(<?php echo (int)$row['id']; ?>)" title="Edit">
-                  <i data-lucide="pencil" width="14" height="14"></i>
-                </button>
-                <button class="btn btn-danger btn-sm btn-icon" onclick="deleteLesson(<?php echo (int)$row['id']; ?>, '<?php echo addslashes(htmlspecialchars($row['title_ar'])); ?>')" title="Delete">
-                  <i data-lucide="trash-2" width="14" height="14"></i>
-                </button>
-              </div>
-            </td>
-          </tr>
-          <?php endforeach; ?>
-        </tbody>
-      </table>
+  <!-- Filters -->
+  <div class="filter-bar">
+    <select id="levelSelect" onchange="filterByLevel()">
+      <option value="">Select Level</option>
+      <?php foreach ($levels as $lvl): ?>
+      <option value="<?php echo $lvl['id']; ?>" <?php echo $lvl['id'] == $selectedLevelId ? 'selected' : ''; ?>>
+        <?php echo htmlspecialchars($lvl['name_' . $currentLang] ?? $lvl['name_ar']); ?>
+      </option>
+      <?php endforeach; ?>
+    </select>
+
+    <select id="subjectSelect" onchange="filterBySubject()">
+      <option value="">Select Subject</option>
+      <?php foreach ($subjects as $sub): ?>
+      <option value="<?php echo $sub['id']; ?>" <?php echo $sub['id'] == $selectedSubjectId ? 'selected' : ''; ?>>
+        <?php echo htmlspecialchars($sub['name_' . $currentLang] ?? $sub['name_ar']); ?>
+      </option>
+      <?php endforeach; ?>
+    </select>
+  </div>
+
+  <!-- Actions -->
+  <div class="actions-bar">
+    <button class="btn-add" onclick="openAddModal()">
+      <i data-lucide="plus" width="16" height="16"></i>
+      Add New Lesson
+    </button>
+  </div>
+
+  <!-- Lessons Table -->
+  <div class="lessons-table">
+    <?php if (empty($lessons)): ?>
+    <div class="empty-state">
+      <i data-lucide="inbox" width="48" height="48"></i>
+      <p>No lessons found. Add your first lesson!</p>
     </div>
+    <?php else: ?>
+    <table>
+      <thead>
+        <tr>
+          <th style="width:40px;">#</th>
+          <th>Lesson Title</th>
+          <th style="width:100px;">Type</th>
+          <th style="width:80px;">Duration</th>
+          <th style="width:80px;">XP</th>
+          <th style="width:100px;">Status</th>
+          <th style="width:100px;">Students</th>
+          <th style="width:120px;">Actions</th>
+        </tr>
+      </thead>
+      <tbody>
+        <?php foreach ($lessons as $idx => $lesson):
+          $titleKey = 'title_' . $currentLang;
+          $lTitle = htmlspecialchars($lesson[$titleKey] ?? $lesson['title_ar']);
+          $lType  = $lesson['content_type'];
+          $lPub   = (int) $lesson['is_published'];
+        ?>
+        <tr data-lesson-id="<?php echo $lesson['id']; ?>">
+          <td><?php echo $lesson['display_order'] ?: ($idx + 1); ?></td>
+          <td>
+            <div class="lesson-title"><?php echo $lTitle; ?></div>
+            <div class="lesson-meta">
+              Order: <?php echo $lesson['display_order']; ?> • 
+              Created: <?php echo date('M j, Y', strtotime($lesson['created_at'])); ?>
+            </div>
+          </td>
+          <td><span class="badge <?php echo $lType; ?>"><?php echo ucfirst($lType); ?></span></td>
+          <td><?php echo $lesson['duration_minutes']; ?> min</td>
+          <td><?php echo $lesson['xp_reward']; ?></td>
+          <td>
+            <span class="badge <?php echo $lPub ? 'published' : 'draft'; ?>">
+              <?php echo $lPub ? 'Published' : 'Draft'; ?>
+            </span>
+          </td>
+          <td><?php echo (int) $lesson['completion_count']; ?> completed</td>
+          <td>
+            <div class="actions">
+              <button class="icon-btn" onclick="openEditModal(<?php echo $lesson['id']; ?>)" title="Edit">
+                <i data-lucide="pencil" width="16" height="16"></i>
+              </button>
+              <button class="icon-btn" onclick="togglePublish(<?php echo $lesson['id']; ?>)" title="Toggle Publish">
+                <i data-lucide="<?php echo $lPub ? 'eye-off' : 'eye'; ?>" width="16" height="16"></i>
+              </button>
+              <button class="icon-btn danger" onclick="deleteLesson(<?php echo $lesson['id']; ?>)" title="Delete">
+                <i data-lucide="trash-2" width="16" height="16"></i>
+              </button>
+            </div>
+          </td>
+        </tr>
+        <?php endforeach; ?>
+      </tbody>
+    </table>
+    <?php endif; ?>
   </div>
 </div>
 
-<!-- ═══ ADD / EDIT LESSON MODAL ════════════════════════════════ -->
+<!-- Add/Edit Modal -->
 <div class="modal-overlay" id="lessonModal">
-  <div class="modal-box">
-    <div class="modal-head">
+  <div class="modal">
+    <div class="modal-header">
       <h3 id="modalTitle">Add New Lesson</h3>
-      <button class="modal-close" onclick="closeModal('lessonModal')">
+      <button class="modal-close" onclick="closeModal()">
         <i data-lucide="x" width="18" height="18"></i>
       </button>
     </div>
-    <div class="modal-body">
-      <form id="lessonForm">
-        <input type="hidden" name="lesson_id" id="field_lesson_id" value="0">
-        <input type="hidden" name="action"    value="save_lesson">
+    <form id="lessonForm" onsubmit="handleSubmit(event)">
+      <div class="modal-body">
+        <input type="hidden" id="lessonId" name="lesson_id">
         <input type="hidden" name="csrf_token" value="<?php echo $csrfToken; ?>">
 
-        <!-- Subject & Level -->
-        <div class="form-grid" style="margin-bottom:1rem;">
+        <div class="form-group">
+          <label>Subject *</label>
+          <select name="subject_id" id="subjectIdField" required>
+            <?php foreach ($subjects as $sub): ?>
+            <option value="<?php echo $sub['id']; ?>">
+              <?php echo htmlspecialchars($sub['name_' . $currentLang] ?? $sub['name_ar']); ?>
+            </option>
+            <?php endforeach; ?>
+          </select>
+        </div>
+
+        <div class="form-group">
+          <label>Title (Arabic) *</label>
+          <input type="text" name="title_ar" id="titleAr" required>
+        </div>
+
+        <div class="form-group">
+          <label>Title (French)</label>
+          <input type="text" name="title_fr" id="titleFr">
+        </div>
+
+        <div class="form-group">
+          <label>Title (English)</label>
+          <input type="text" name="title_en" id="titleEn">
+        </div>
+
+        <div class="form-group">
+          <label>Description (Arabic)</label>
+          <textarea name="description_ar" id="descAr"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Description (French)</label>
+          <textarea name="description_fr" id="descFr"></textarea>
+        </div>
+
+        <div class="form-group">
+          <label>Description (English)</label>
+          <textarea name="description_en" id="descEn"></textarea>
+        </div>
+
+        <div class="form-row">
           <div class="form-group">
-            <label class="form-label">Subject <span class="req">*</span></label>
-            <select name="subject_id" id="field_subject_id" class="form-control" required>
-              <option value="">— Select Subject —</option>
-              <?php foreach ($subjects as $sub): ?>
-              <option value="<?php echo (int)$sub['id']; ?>">
-                <?php echo htmlspecialchars($sub['name_' . $currentLang]); ?>
-                (<?php echo htmlspecialchars($sub['level_name']); ?>)
-              </option>
-              <?php endforeach; ?>
+            <label>Content Type *</label>
+            <select name="content_type" id="contentType" required onchange="updatePreview()">
+              <option value="video">Video (YouTube)</option>
+              <option value="pdf">PDF Document</option>
+              <option value="book">Book/Resource</option>
             </select>
           </div>
           <div class="form-group">
-            <label class="form-label">Content Type <span class="req">*</span></label>
-            <select name="content_type" id="field_content_type" class="form-control">
-              <option value="video">🎬 YouTube Video</option>
-              <option value="pdf">📄 MediaFire PDF</option>
-              <option value="book">📚 MediaFire Book</option>
-            </select>
+            <label>Display Order</label>
+            <input type="number" name="display_order" id="displayOrder" min="0" value="0">
           </div>
         </div>
 
-        <!-- URL with Live Preview -->
-        <div class="form-group full" style="margin-bottom:1rem;">
-          <label class="form-label">Resource URL <span class="req">*</span></label>
-          <input type="url" name="url" id="field_url" class="form-control"
-                 placeholder="https://youtube.com/watch?v=... or https://mediafire.com/..."
-                 required>
-          <span class="form-hint" id="urlHint">YouTube video link or MediaFire download link</span>
-          
-          <!-- Live Preview Container -->
-          <div id="urlPreview" style="display:none;margin-top:1rem;padding:1rem;background:var(--blue-50);border-radius:8px;border:1px solid var(--blue-100);">
-            <!-- YouTube Preview -->
-            <div id="youtubePreview" style="display:none;">
-              <div style="font-size:.85rem;font-weight:600;color:var(--blue-700);margin-bottom:.75rem;display:flex;align-items:center;gap:.5rem;">
-                <i data-lucide="play-circle" width="16" height="16"></i>
-                YouTube Video Preview
-              </div>
-              <div style="position:relative;padding-bottom:56.25%;height:0;overflow:hidden;border-radius:6px;background:#000;">
-                <iframe id="youtubeEmbed" style="position:absolute;top:0;left:0;width:100%;height:100%;border:0;"
-                        allowfullscreen></iframe>
-              </div>
-            </div>
-            
-            <!-- MediaFire/PDF Preview -->
-            <div id="mediaPreview" style="display:none;">
-              <div style="display:flex;align-items:center;gap:1rem;">
-                <div id="fileIcon" style="width:48px;height:48px;border-radius:8px;display:flex;align-items:center;justify-content:center;font-size:1.8rem;flex-shrink:0;">
-                  📄
-                </div>
-                <div style="flex:1;min-width:0;">
-                  <div style="font-size:.85rem;font-weight:600;color:var(--text-primary);margin-bottom:.25rem;" id="fileTypeLabel">
-                    MediaFire Document
-                  </div>
-                  <div style="font-size:.75rem;color:var(--text-muted);" id="fileUrlPreview"></div>
-                </div>
-                <a href="#" target="_blank" rel="noopener" id="testLinkBtn"
-                   style="display:inline-flex;align-items:center;gap:.4rem;padding:.5rem 1rem;background:var(--blue-700);color:#fff;border-radius:6px;text-decoration:none;font-size:.8rem;font-weight:600;white-space:nowrap;">
-                  <i data-lucide="external-link" width="14" height="14"></i>
-                  Test Link
-                </a>
-              </div>
-            </div>
-            
-            <!-- Invalid URL Warning -->
-            <div id="invalidPreview" style="display:none;">
-              <div style="display:flex;align-items:center;gap:.75rem;padding:.75rem;background:#fee2e2;border-radius:6px;border:1px solid #fecaca;">
-                <i data-lucide="alert-circle" width="18" height="18" color="#dc2626"></i>
-                <span style="font-size:.85rem;color:#b91c1c;font-weight:500;">
-                  Invalid URL format. Please use a valid YouTube or MediaFire link.
-                </span>
-              </div>
-            </div>
-          </div>
+        <div class="form-group">
+          <label>URL (YouTube / MediaFire / Direct Link) *</label>
+          <input type="url" name="url" id="urlField" required onchange="updatePreview()" onkeyup="updatePreview()">
         </div>
 
-        <!-- Titles (tabbed AR/FR/EN) -->
-        <div class="lang-tab-group" style="margin-bottom:1rem;">
-          <label class="form-label" style="margin-bottom:.5rem;">Titles & Descriptions</label>
-          <div class="lang-tabs">
-            <button type="button" class="lang-tab active" data-target="lang_ar">AR</button>
-            <button type="button" class="lang-tab"        data-target="lang_fr">FR</button>
-            <button type="button" class="lang-tab"        data-target="lang_en">EN</button>
-          </div>
-          <div id="lang_ar" class="lang-panel active">
-            <input  type="text"  name="title_ar" id="field_title_ar" class="form-control" placeholder="العنوان بالعربية *" dir="rtl" required>
-            <textarea name="desc_ar"  id="field_desc_ar"  class="form-control" placeholder="الوصف بالعربية" dir="rtl"></textarea>
-          </div>
-          <div id="lang_fr" class="lang-panel">
-            <input  type="text"  name="title_fr" id="field_title_fr" class="form-control" placeholder="Titre en français">
-            <textarea name="desc_fr"  id="field_desc_fr"  class="form-control" placeholder="Description en français"></textarea>
-          </div>
-          <div id="lang_en" class="lang-panel">
-            <input  type="text"  name="title_en" id="field_title_en" class="form-control" placeholder="Title in English">
-            <textarea name="desc_en"  id="field_desc_en"  class="form-control" placeholder="Description in English"></textarea>
-          </div>
+        <!-- ADDED: Live Preview -->
+        <div id="previewBox" class="preview-box" style="display:none;">
+          <div id="previewContent"></div>
         </div>
 
-        <!-- XP / Duration / Order -->
-        <div class="form-grid">
+        <div class="form-row">
           <div class="form-group">
-            <label class="form-label">XP Reward</label>
-            <input type="number" name="xp_reward" id="field_xp_reward" class="form-control" value="10" min="1" max="500">
+            <label>Duration (minutes)</label>
+            <input type="number" name="duration_minutes" id="durationMin" min="1" value="5">
           </div>
           <div class="form-group">
-            <label class="form-label">Duration (minutes)</label>
-            <input type="number" name="duration_minutes" id="field_duration" class="form-control" value="0" min="0">
-          </div>
-          <div class="form-group">
-            <label class="form-label">Display Order</label>
-            <input type="number" name="display_order" id="field_order" class="form-control" value="0" min="0">
-          </div>
-          <div class="form-group" style="align-self:end;padding-bottom:.65rem;">
-            <label style="display:flex;align-items:center;gap:.5rem;cursor:pointer;font-size:.85rem;font-weight:600;color:var(--text-secondary);">
-              <input type="checkbox" name="is_published" id="field_published" value="1" checked style="width:16px;height:16px;cursor:pointer;">
-              Publish immediately
-            </label>
+            <label>XP Reward</label>
+            <input type="number" name="xp_reward" id="xpReward" min="1" value="10">
           </div>
         </div>
 
-      </form>
-    </div>
-    <div class="modal-footer">
-      <button class="btn btn-ghost" onclick="closeModal('lessonModal')">Cancel</button>
-      <button class="btn btn-primary" id="saveLessonBtn" onclick="saveLesson()" disabled>
-        <i data-lucide="save" width="15" height="15"></i>
-        <span id="saveBtnLabel">Add Lesson</span>
-      </button>
-    </div>
+        <div class="form-group">
+          <div class="checkbox-group">
+            <input type="checkbox" name="is_published" id="isPublished" value="1">
+            <label for="isPublished" style="margin:0;">Publish immediately</label>
+          </div>
+        </div>
+      </div>
+
+      <div class="modal-footer">
+        <button type="button" class="btn btn-secondary" onclick="closeModal()">Cancel</button>
+        <button type="submit" class="btn btn-primary" id="submitBtn">Save Lesson</button>
+      </div>
+    </form>
   </div>
 </div>
 
 <script>
-// ── DataTable init ─────────────────────────────────────────
-$(document).ready(() => {
-  initDataTable('#lessonsTable');
-  lucide.createIcons();
-});
+lucide.createIcons();
 
-// ── URL Preview Logic ─────────────────────────────────────
-const urlField = document.getElementById('field_url');
-const urlPreview = document.getElementById('urlPreview');
-const youtubePreview = document.getElementById('youtubePreview');
-const mediaPreview = document.getElementById('mediaPreview');
-const invalidPreview = document.getElementById('invalidPreview');
-const saveBtn = document.getElementById('saveLessonBtn');
+const csrfToken = document.querySelector('meta[name="csrf-token"]').content;
 
-let previewTimeout;
-
-urlField.addEventListener('input', () => {
-  clearTimeout(previewTimeout);
-  previewTimeout = setTimeout(() => updateUrlPreview(), 500);
-});
-
-function updateUrlPreview() {
-  const url = urlField.value.trim();
-  
-  // Hide all previews first
-  urlPreview.style.display = 'none';
-  youtubePreview.style.display = 'none';
-  mediaPreview.style.display = 'none';
-  invalidPreview.style.display = 'none';
-  
-  // Empty URL
-  if (!url) {
-    saveBtn.disabled = true;
-    return;
-  }
-  
-  // Basic URL validation
-  if (!url.startsWith('https://')) {
-    urlPreview.style.display = 'block';
-    invalidPreview.style.display = 'block';
-    saveBtn.disabled = true;
-    lucide.createIcons();
-    return;
-  }
-  
-  // Check for YouTube
-  const ytRegex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/ ]{11})/i;
-  const ytMatch = url.match(ytRegex);
-  
-  if (ytMatch && ytMatch[1]) {
-    // YouTube video
-    const videoId = ytMatch[1];
-    urlPreview.style.display = 'block';
-    youtubePreview.style.display = 'block';
-    document.getElementById('youtubeEmbed').src = `https://www.youtube.com/embed/${videoId}?rel=0`;
-    saveBtn.disabled = false;
-    lucide.createIcons();
-    return;
-  }
-  
-  // Check for MediaFire or other document links
-  if (url.includes('mediafire.com') || url.includes('drive.google.com') || url.match(/\.(pdf|docx?|pptx?)$/i)) {
-    urlPreview.style.display = 'block';
-    mediaPreview.style.display = 'block';
-    
-    // Determine file type
-    let fileType = 'Document';
-    let icon = '📄';
-    
-    if (url.toLowerCase().includes('.pdf') || url.includes('/file/')) {
-      fileType = 'PDF Document';
-      icon = '📄';
-    } else if (url.toLowerCase().includes('.doc')) {
-      fileType = 'Word Document';
-      icon = '📝';
-    } else if (url.toLowerCase().includes('.ppt')) {
-      fileType = 'PowerPoint';
-      icon = '📊';
-    } else if (url.includes('mediafire')) {
-      fileType = 'MediaFire File';
-      icon = '📦';
-    }
-    
-    document.getElementById('fileIcon').textContent = icon;
-    document.getElementById('fileTypeLabel').textContent = fileType;
-    document.getElementById('fileUrlPreview').textContent = url.length > 60 ? url.substring(0, 60) + '...' : url;
-    document.getElementById('testLinkBtn').href = url;
-    
-    saveBtn.disabled = false;
-    lucide.createIcons();
-    return;
-  }
-  
-  // Unknown URL type
-  urlPreview.style.display = 'block';
-  invalidPreview.style.display = 'block';
-  saveBtn.disabled = true;
-  lucide.createIcons();
+// Filter functions
+function filterByLevel() {
+  const levelId = document.getElementById('levelSelect').value;
+  window.location.href = `?level_id=${levelId}`;
 }
 
-// ── Open modal for new lesson ──────────────────────────────
-document.getElementById('lessonModal').addEventListener('click', e => {
-  if (e.target === document.getElementById('lessonModal')) closeModal('lessonModal');
-});
-
-// Override openModal to reset form
-const _origOpen = window.openModal;
-window.openModal = function(id) {
-  if (id === 'lessonModal') {
-    document.getElementById('modalTitle').textContent = 'Add New Lesson';
-    document.getElementById('saveBtnLabel').textContent = 'Add Lesson';
-    document.getElementById('lessonForm').reset();
-    document.getElementById('field_lesson_id').value = '0';
-    document.getElementById('field_published').checked = true;
-    
-    // Reset preview
-    urlPreview.style.display = 'none';
-    saveBtn.disabled = true;
-  }
-  _origOpen(id);
-};
-
-// ── Edit lesson ────────────────────────────────────────────
-async function editLesson(id) {
-  try {
-    const data = await adminFetch('manage_lessons.php', { action: 'get_lesson', lesson_id: id });
-    if (!data.success || !data.lesson) { adminToast('error', 'Could not load lesson.'); return; }
-    const l = data.lesson;
-
-    document.getElementById('modalTitle').textContent  = 'Edit Lesson';
-    document.getElementById('saveBtnLabel').textContent = 'Save Changes';
-    document.getElementById('field_lesson_id').value   = l.id;
-    document.getElementById('field_subject_id').value  = l.subject_id;
-    document.getElementById('field_content_type').value = l.content_type;
-    document.getElementById('field_url').value          = l.url;
-    document.getElementById('field_title_ar').value     = l.title_ar || '';
-    document.getElementById('field_title_fr').value     = l.title_fr || '';
-    document.getElementById('field_title_en').value     = l.title_en || '';
-    document.getElementById('field_desc_ar').value      = l.description_ar || '';
-    document.getElementById('field_desc_fr').value      = l.description_fr || '';
-    document.getElementById('field_desc_en').value      = l.description_en || '';
-    document.getElementById('field_xp_reward').value   = l.xp_reward;
-    document.getElementById('field_duration').value     = l.duration_minutes;
-    document.getElementById('field_order').value        = l.display_order;
-    document.getElementById('field_published').checked  = l.is_published == 1;
-
-    // Trigger URL preview
-    updateUrlPreview();
-
-    document.getElementById('lessonModal').classList.add('open');
-    document.body.style.overflow = 'hidden';
-    lucide.createIcons();
-  } catch(e) {
-    adminToast('error', 'Network error.');
-  }
+function filterBySubject() {
+  const levelId = document.getElementById('levelSelect').value;
+  const subjectId = document.getElementById('subjectSelect').value;
+  window.location.href = `?level_id=${levelId}&subject_id=${subjectId}`;
 }
 
-// ── Save lesson ────────────────────────────────────────────
-async function saveLesson() {
-  const btn  = document.getElementById('saveLessonBtn');
-  const form = document.getElementById('lessonForm');
-  btn.disabled = true;
-  btn.innerHTML = '<span style="border:2px solid rgba(255,255,255,.3);border-top-color:#fff;border-radius:50%;width:14px;height:14px;animation:spin .7s linear infinite;display:inline-block;"></span> Saving...';
+// Modal functions
+function openAddModal() {
+  document.getElementById('modalTitle').textContent = 'Add New Lesson';
+  document.getElementById('lessonForm').reset();
+  document.getElementById('lessonId').value = '';
+  document.getElementById('subjectIdField').value = <?php echo $selectedSubjectId; ?>;
+  document.getElementById('lessonModal').classList.add('open');
+  document.getElementById('previewBox').style.display = 'none';
+}
 
-  try {
-    const data = new URLSearchParams(new FormData(form));
-    data.set('csrf_token', CSRF_TOKEN);
-    const res = await fetch('manage_lessons.php', {
-      method: 'POST',
-      headers: { 'X-Requested-With': 'XMLHttpRequest' },
-      body: data,
+function closeModal() {
+  document.getElementById('lessonModal').classList.remove('open');
+}
+
+function openEditModal(lessonId) {
+  // Fetch lesson data via AJAX (simplified - you can implement full fetch)
+  fetch(`get_lesson.php?id=${lessonId}`)
+    .then(r => r.json())
+    .then(data => {
+      if (data.success) {
+        const l = data.lesson;
+        document.getElementById('modalTitle').textContent = 'Edit Lesson';
+        document.getElementById('lessonId').value = l.id;
+        document.getElementById('subjectIdField').value = l.subject_id;
+        document.getElementById('titleAr').value = l.title_ar;
+        document.getElementById('titleFr').value = l.title_fr || '';
+        document.getElementById('titleEn').value = l.title_en || '';
+        document.getElementById('descAr').value = l.description_ar || '';
+        document.getElementById('descFr').value = l.description_fr || '';
+        document.getElementById('descEn').value = l.description_en || '';
+        document.getElementById('contentType').value = l.content_type;
+        document.getElementById('urlField').value = l.url;
+        document.getElementById('durationMin').value = l.duration_minutes;
+        document.getElementById('xpReward').value = l.xp_reward;
+        document.getElementById('displayOrder').value = l.display_order;
+        document.getElementById('isPublished').checked = l.is_published == 1;
+        document.getElementById('lessonModal').classList.add('open');
+        updatePreview();
+      }
     });
-    const json = await res.json();
+}
 
-    if (json.success) {
-      adminToast('success', json.message);
-      setTimeout(() => location.reload(), 1200);
+// Form submit (FIXED: Now sends all fields)
+function handleSubmit(e) {
+  e.preventDefault();
+  const form = e.target;
+  const formData = new FormData(form);
+  
+  const lessonId = document.getElementById('lessonId').value;
+  formData.append('ajax_action', lessonId ? 'edit_lesson' : 'add_lesson');
+  
+  fetch(window.location.href, {
+    method: 'POST',
+    body: formData
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      alert(data.message);
+      closeModal();
+      location.reload();
     } else {
-      adminToast('error', json.message || 'Error saving lesson.');
+      alert('Error: ' + data.message);
     }
-  } catch(e) {
-    adminToast('error', 'Network error. Please try again.');
-  } finally {
-    btn.disabled = false;
-    btn.innerHTML = '<i data-lucide="save" width="15" height="15"></i> <span id="saveBtnLabel">Save</span>';
+  })
+  .catch(err => {
+    alert('Network error: ' + err.message);
+  });
+}
+
+// Delete lesson
+function deleteLesson(id) {
+  if (!confirm('Are you sure you want to delete this lesson? This cannot be undone.')) return;
+  
+  const formData = new FormData();
+  formData.append('ajax_action', 'delete_lesson');
+  formData.append('lesson_id', id);
+  formData.append('csrf_token', csrfToken);
+  
+  fetch(window.location.href, {
+    method: 'POST',
+    body: formData
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      location.reload();
+    } else {
+      alert('Error: ' + data.message);
+    }
+  });
+}
+
+// Toggle publish
+function togglePublish(id) {
+  const formData = new FormData();
+  formData.append('ajax_action', 'toggle_publish');
+  formData.append('lesson_id', id);
+  formData.append('csrf_token', csrfToken);
+  
+  fetch(window.location.href, {
+    method: 'POST',
+    body: formData
+  })
+  .then(r => r.json())
+  .then(data => {
+    if (data.success) {
+      location.reload();
+    }
+  });
+}
+
+// ADDED: Live preview function
+function updatePreview() {
+  const url = document.getElementById('urlField').value.trim();
+  const type = document.getElementById('contentType').value;
+  const previewBox = document.getElementById('previewBox');
+  const previewContent = document.getElementById('previewContent');
+  
+  if (!url) {
+    previewBox.style.display = 'none';
+    return;
+  }
+  
+  previewBox.style.display = 'block';
+  
+  // YouTube preview
+  if (type === 'video' && (url.includes('youtube.com') || url.includes('youtu.be'))) {
+    const videoId = extractYouTubeId(url);
+    if (videoId) {
+      previewContent.innerHTML = `
+        <iframe src="https://www.youtube.com/embed/${videoId}" 
+                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture" 
+                allowfullscreen></iframe>
+      `;
+      return;
+    }
+  }
+  
+  // MediaFire or PDF preview
+  if (type === 'pdf' || url.includes('mediafire.com')) {
+    previewContent.innerHTML = `
+      <a href="${url}" target="_blank" class="preview-link">
+        <i data-lucide="external-link" width="16" height="16"></i>
+        Open ${type === 'pdf' ? 'PDF' : 'Resource'} in new tab
+      </a>
+    `;
     lucide.createIcons();
+    return;
   }
+  
+  // Generic link
+  previewContent.innerHTML = `
+    <a href="${url}" target="_blank" class="preview-link">
+      <i data-lucide="external-link" width="16" height="16"></i>
+      Open link in new tab
+    </a>
+  `;
+  lucide.createIcons();
 }
 
-// ── Delete lesson ──────────────────────────────────────────
-async function deleteLesson(id, title) {
-  if (!confirm(`Delete lesson "${title}"?\n\nThis cannot be undone.`)) return;
-  try {
-    const res = await adminFetch('manage_lessons.php', { action: 'delete_lesson', lesson_id: id });
-    if (res.success) {
-      adminToast('success', 'Lesson deleted.');
-      document.querySelector(`tr[data-id="${id}"]`)?.remove();
-    } else {
-      adminToast('error', res.message || 'Delete failed.');
-    }
-  } catch(e) {
-    adminToast('error', 'Network error.');
-  }
+function extractYouTubeId(url) {
+  const regex = /(?:youtube\.com\/(?:[^\/]+\/.+\/|(?:v|e(?:mbed)?)\/|.*[?&]v=)|youtu\.be\/)([^"&?\/ ]{11})/i;
+  const match = url.match(regex);
+  return match ? match[1] : null;
 }
-
-// Spinner keyframes
-const style = document.createElement('style');
-style.textContent = '@keyframes spin { to { transform: rotate(360deg); } }';
-document.head.appendChild(style);
 </script>
 
-<?php require_once '_layout_end.php'; ?>
+</body>
+</html>

@@ -1,20 +1,22 @@
 <?php
 /**
- * Database Helper Functions
- * Provides PDO-based database operations with prepared statements
- * FIXED: All references changed from 'preferred_language' to 'preferred_lang'
+ * includes/db.php — Database Helper Functions
+ * FIXED: All references use preferred_lang (not preferred_language)
+ * ADDED: db() wrapper for consistency, anti-cheat support
  */
+
+declare(strict_types=1);
 
 if (!defined('DB_HOST')) {
     die('Direct access not permitted');
 }
 
 /**
- * Get PDO database connection
+ * Get PDO database connection (Singleton)
  * @return PDO Database connection
  * @throws PDOException on connection failure
  */
-function getDbConnection(): PDO {
+function db(): PDO {
     static $pdo = null;
     
     if ($pdo === null) {
@@ -29,7 +31,8 @@ function getDbConnection(): PDO {
             
             $pdo = new PDO($dsn, DB_USER, DB_PASS, $options);
         } catch (PDOException $e) {
-            error_log('Database connection failed: ' . $e->getMessage());
+            error_log('[DB] Connection failed: ' . $e->getMessage());
+            http_response_code(500);
             die('Database connection failed. Please contact administrator.');
         }
     }
@@ -38,56 +41,67 @@ function getDbConnection(): PDO {
 }
 
 /**
- * Execute a query and return all rows
+ * Legacy alias for backwards compatibility
+ */
+function getDbConnection(): PDO {
+    return db();
+}
+
+/**
+ * Execute query and return all rows
  * @param string $sql SQL query with placeholders
  * @param array $params Parameters to bind
  * @return array Array of rows
  */
-function db_query(string $sql, array $params = []): array {
+function db_all(string $sql, array $params = []): array {
     try {
-        $pdo = getDbConnection();
-        $stmt = $pdo->prepare($sql);
+        $stmt = db()->prepare($sql);
         $stmt->execute($params);
         return $stmt->fetchAll();
     } catch (PDOException $e) {
-        error_log('Query failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
+        error_log('[DB] Query failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
         return [];
     }
 }
 
 /**
- * Execute a query and return single row
+ * Alias for db_all (backwards compatibility)
+ */
+function db_query(string $sql, array $params = []): array {
+    return db_all($sql, $params);
+}
+
+/**
+ * Execute query and return single row
  * @param string $sql SQL query with placeholders
  * @param array $params Parameters to bind
  * @return array|null Single row or null
  */
 function db_row(string $sql, array $params = []): ?array {
     try {
-        $pdo = getDbConnection();
-        $stmt = $pdo->prepare($sql);
+        $stmt = db()->prepare($sql);
         $stmt->execute($params);
         $result = $stmt->fetch();
         return $result ?: null;
     } catch (PDOException $e) {
-        error_log('Query failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
+        error_log('[DB] Query failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
         return null;
     }
 }
 
 /**
- * Execute a query and return single value
+ * Execute query and return single value
  * @param string $sql SQL query with placeholders
  * @param array $params Parameters to bind
  * @return mixed Single value or null
  */
 function db_value(string $sql, array $params = []) {
     try {
-        $pdo = getDbConnection();
-        $stmt = $pdo->prepare($sql);
+        $stmt = db()->prepare($sql);
         $stmt->execute($params);
         return $stmt->fetchColumn();
     } catch (PDOException $e) {
-        error_log('Query failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
+        error_log('[DB] Query failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
         return null;
     }
 }
@@ -98,23 +112,36 @@ function db_value(string $sql, array $params = []) {
  * @param array $params Parameters to bind
  * @return bool Success status
  */
-function db_execute(string $sql, array $params = []): bool {
+function db_run(string $sql, array $params = []): bool {
     try {
-        $pdo = getDbConnection();
-        $stmt = $pdo->prepare($sql);
+        $stmt = db()->prepare($sql);
         return $stmt->execute($params);
     } catch (PDOException $e) {
-        error_log('Execute failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
+        error_log('[DB] Execute failed: ' . $e->getMessage() . ' | SQL: ' . $sql);
         return false;
     }
+}
+
+/**
+ * Alias for db_run (backwards compatibility)
+ */
+function db_execute(string $sql, array $params = []): bool {
+    return db_run($sql, $params);
 }
 
 /**
  * Get last insert ID
  * @return int Last insert ID
  */
+function db_last_id(): int {
+    return (int) db()->lastInsertId();
+}
+
+/**
+ * Alias for db_last_id (backwards compatibility)
+ */
 function db_insert_id(): int {
-    return (int) getDbConnection()->lastInsertId();
+    return db_last_id();
 }
 
 /**
@@ -123,9 +150,9 @@ function db_insert_id(): int {
  */
 function db_begin(): bool {
     try {
-        return getDbConnection()->beginTransaction();
+        return db()->beginTransaction();
     } catch (PDOException $e) {
-        error_log('Transaction begin failed: ' . $e->getMessage());
+        error_log('[DB] Transaction begin failed: ' . $e->getMessage());
         return false;
     }
 }
@@ -136,9 +163,9 @@ function db_begin(): bool {
  */
 function db_commit(): bool {
     try {
-        return getDbConnection()->commit();
+        return db()->commit();
     } catch (PDOException $e) {
-        error_log('Transaction commit failed: ' . $e->getMessage());
+        error_log('[DB] Transaction commit failed: ' . $e->getMessage());
         return false;
     }
 }
@@ -149,21 +176,25 @@ function db_commit(): bool {
  */
 function db_rollback(): bool {
     try {
-        return getDbConnection()->rollBack();
+        return db()->rollBack();
     } catch (PDOException $e) {
-        error_log('Transaction rollback failed: ' . $e->getMessage());
+        error_log('[DB] Transaction rollback failed: ' . $e->getMessage());
         return false;
     }
 }
 
 /**
- * Sanitize input for safe database storage
+ * Sanitize input for safe display (not for SQL - use prepared statements!)
  * @param string $input Input string
  * @return string Sanitized string
  */
 function db_escape(string $input): string {
     return htmlspecialchars(trim($input), ENT_QUOTES, 'UTF-8');
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  USER FUNCTIONS (FIXED: Uses preferred_lang)
+// ════════════════════════════════════════════════════════════════════════════
 
 /**
  * Check if user exists by username or email
@@ -178,7 +209,7 @@ function userExists(string $username, string $email): bool {
 
 /**
  * Get user by username
- * FIXED: Uses preferred_lang instead of preferred_language
+ * FIXED: Uses preferred_lang column
  * @param string $username Username
  * @return array|null User data or null
  */
@@ -194,7 +225,7 @@ function getUserByUsername(string $username): ?array {
 
 /**
  * Get user by email
- * FIXED: Uses preferred_lang instead of preferred_language
+ * FIXED: Uses preferred_lang column
  * @param string $email Email address
  * @return array|null User data or null
  */
@@ -210,7 +241,7 @@ function getUserByEmail(string $email): ?array {
 
 /**
  * Get user by ID
- * FIXED: Uses preferred_lang instead of preferred_language
+ * FIXED: Uses preferred_lang column
  * @param int $userId User ID
  * @return array|null User data or null
  */
@@ -226,7 +257,7 @@ function getUserById(int $userId): ?array {
 
 /**
  * Create new user
- * FIXED: Uses preferred_lang instead of preferred_language
+ * FIXED: Uses preferred_lang column
  * @param array $data User data
  * @return int|bool User ID on success, false on failure
  */
@@ -243,12 +274,12 @@ function createUser(array $data) {
         $data['full_name'],
         $data['role'] ?? 'student',
         $data['level_id'] ?? 1,
-        $data['preferred_lang'] ?? 'fr',  // FIXED
+        $data['preferred_lang'] ?? 'fr',  // FIXED: Default to French
         $data['is_active'] ?? 1
     ];
     
-    if (db_execute($sql, $params)) {
-        return db_insert_id();
+    if (db_run($sql, $params)) {
+        return db_last_id();
     }
     return false;
 }
@@ -260,12 +291,12 @@ function createUser(array $data) {
  */
 function updateLastLogin(int $userId): bool {
     $sql = "UPDATE users SET last_login = NOW() WHERE id = ?";
-    return db_execute($sql, [$userId]);
+    return db_run($sql, [$userId]);
 }
 
 /**
  * Update user profile
- * FIXED: Uses preferred_lang instead of preferred_language
+ * FIXED: Uses preferred_lang column
  * @param int $userId User ID
  * @param array $data Updated data
  * @return bool Success status
@@ -289,7 +320,7 @@ function updateUserProfile(int $userId, array $data): bool {
     $params[] = $userId;
     $sql = "UPDATE users SET " . implode(', ', $updates) . ", updated_at = NOW() WHERE id = ?";
     
-    return db_execute($sql, $params);
+    return db_run($sql, $params);
 }
 
 /**
@@ -300,19 +331,31 @@ function updateUserProfile(int $userId, array $data): bool {
  */
 function updateUserPassword(int $userId, string $newPassword): bool {
     $sql = "UPDATE users SET password = ?, updated_at = NOW() WHERE id = ?";
-    return db_execute($sql, [$newPassword, $userId]);
+    return db_run($sql, [$newPassword, $userId]);
 }
 
 /**
- * Add XP points to user
+ * Add XP points to user and recalculate level
+ * FIXED: Proper level calculation
  * @param int $userId User ID
  * @param int $xpPoints XP points to add
  * @return bool Success status
  */
 function addUserXP(int $userId, int $xpPoints): bool {
-    $sql = "UPDATE users SET xp_points = xp_points + ?, updated_at = NOW() WHERE id = ?";
-    return db_execute($sql, [$xpPoints, $userId]);
+    // Get current XP
+    $user = db_row('SELECT xp_points FROM users WHERE id = ?', [$userId]);
+    if (!$user) return false;
+    
+    $newXP = (int) $user['xp_points'] + $xpPoints;
+    $newLevel = (int) floor($newXP / XP_PER_LEVEL) + 1;
+    
+    $sql = "UPDATE users SET xp_points = ?, current_level = ?, updated_at = NOW() WHERE id = ?";
+    return db_run($sql, [$newXP, $newLevel, $userId]);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  LESSON FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
 
 /**
  * Get all levels
@@ -320,7 +363,7 @@ function addUserXP(int $userId, int $xpPoints): bool {
  */
 function getLevels(): array {
     $sql = "SELECT * FROM levels WHERE is_active = 1 ORDER BY display_order ASC";
-    return db_query($sql);
+    return db_all($sql);
 }
 
 /**
@@ -330,7 +373,7 @@ function getLevels(): array {
  */
 function getSubjectsByLevel(int $levelId): array {
     $sql = "SELECT * FROM subjects WHERE level_id = ? AND is_active = 1 ORDER BY display_order ASC";
-    return db_query($sql, [$levelId]);
+    return db_all($sql, [$levelId]);
 }
 
 /**
@@ -340,11 +383,12 @@ function getSubjectsByLevel(int $levelId): array {
  */
 function getLessonsBySubject(int $subjectId): array {
     $sql = "SELECT * FROM lessons WHERE subject_id = ? AND is_published = 1 ORDER BY display_order ASC";
-    return db_query($sql, [$subjectId]);
+    return db_all($sql, [$subjectId]);
 }
 
 /**
  * Get lesson progress for user
+ * FIXED: Includes anti_cheat_verified field
  * @param int $userId User ID
  * @param int $lessonId Lesson ID
  * @return array|null Progress data or null
@@ -356,6 +400,7 @@ function getLessonProgress(int $userId, int $lessonId): ?array {
 
 /**
  * Update lesson progress
+ * FIXED: Supports anti_cheat_verified field
  * @param int $userId User ID
  * @param int $lessonId Lesson ID
  * @param array $data Progress data
@@ -367,21 +412,23 @@ function updateLessonProgress(int $userId, int $lessonId, array $data): bool {
     if ($existing) {
         $sql = "UPDATE lesson_progress 
                 SET status = ?, completion_percentage = ?, watch_duration = ?, 
-                    xp_earned = ?, completed_at = ?, updated_at = NOW()
+                    xp_earned = ?, anti_cheat_verified = ?, completed_at = ?, updated_at = NOW()
                 WHERE user_id = ? AND lesson_id = ?";
         $params = [
             $data['status'] ?? $existing['status'],
             $data['completion_percentage'] ?? $existing['completion_percentage'],
             $data['watch_duration'] ?? $existing['watch_duration'],
             $data['xp_earned'] ?? $existing['xp_earned'],
+            $data['anti_cheat_verified'] ?? $existing['anti_cheat_verified'],
             $data['completed_at'] ?? $existing['completed_at'],
             $userId,
             $lessonId
         ];
     } else {
         $sql = "INSERT INTO lesson_progress 
-                (user_id, lesson_id, status, completion_percentage, watch_duration, xp_earned, completed_at)
-                VALUES (?, ?, ?, ?, ?, ?, ?)";
+                (user_id, lesson_id, status, completion_percentage, watch_duration, 
+                 xp_earned, anti_cheat_verified, completed_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?, ?)";
         $params = [
             $userId,
             $lessonId,
@@ -389,11 +436,12 @@ function updateLessonProgress(int $userId, int $lessonId, array $data): bool {
             $data['completion_percentage'] ?? 0,
             $data['watch_duration'] ?? 0,
             $data['xp_earned'] ?? 0,
+            $data['anti_cheat_verified'] ?? 0,
             $data['completed_at'] ?? null
         ];
     }
     
-    return db_execute($sql, $params);
+    return db_run($sql, $params);
 }
 
 /**
@@ -406,6 +454,10 @@ function getCompletedLessonsCount(int $userId): int {
     return (int) db_value($sql, [$userId]);
 }
 
+// ════════════════════════════════════════════════════════════════════════════
+//  QUIZ FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
+
 /**
  * Get user's quiz attempts
  * @param int $userId User ID
@@ -415,10 +467,10 @@ function getCompletedLessonsCount(int $userId): int {
 function getUserQuizAttempts(int $userId, ?int $quizId = null): array {
     if ($quizId) {
         $sql = "SELECT * FROM quiz_attempts WHERE user_id = ? AND quiz_id = ? ORDER BY created_at DESC";
-        return db_query($sql, [$userId, $quizId]);
+        return db_all($sql, [$userId, $quizId]);
     }
     $sql = "SELECT * FROM quiz_attempts WHERE user_id = ? ORDER BY created_at DESC";
-    return db_query($sql, [$userId]);
+    return db_all($sql, [$userId]);
 }
 
 /**
@@ -444,11 +496,27 @@ function saveQuizAttempt(array $data) {
         $data['answers'] ?? null
     ];
     
-    if (db_execute($sql, $params)) {
-        return db_insert_id();
+    if (db_run($sql, $params)) {
+        return db_last_id();
     }
     return false;
 }
+
+/**
+ * Get user's average quiz score
+ * FIXED: Proper calculation
+ * @param int $userId User ID
+ * @return float Average score (0-100)
+ */
+function getUserAverageQuizScore(int $userId): float {
+    $sql = "SELECT AVG(score) as avg_score FROM quiz_attempts WHERE user_id = ? AND passed = 1";
+    $result = db_value($sql, [$userId]);
+    return $result ? (float) $result : 0.0;
+}
+
+// ════════════════════════════════════════════════════════════════════════════
+//  ACHIEVEMENT FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
 
 /**
  * Get user's achievements
@@ -461,11 +529,11 @@ function getUserAchievements(int $userId): array {
             INNER JOIN user_achievements ua ON a.id = ua.achievement_id
             WHERE ua.user_id = ?
             ORDER BY ua.earned_at DESC";
-    return db_query($sql, [$userId]);
+    return db_all($sql, [$userId]);
 }
 
 /**
- * Award achievement to user
+ * Award achievement to user (idempotent)
  * @param int $userId User ID
  * @param int $achievementId Achievement ID
  * @return bool Success status
@@ -473,8 +541,12 @@ function getUserAchievements(int $userId): array {
 function awardAchievement(int $userId, int $achievementId): bool {
     $sql = "INSERT IGNORE INTO user_achievements (user_id, achievement_id, earned_at)
             VALUES (?, ?, NOW())";
-    return db_execute($sql, [$userId, $achievementId]);
+    return db_run($sql, [$userId, $achievementId]);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  NOTIFICATION FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
 
 /**
  * Get unread notifications for user
@@ -483,7 +555,7 @@ function awardAchievement(int $userId, int $achievementId): bool {
  */
 function getUnreadNotifications(int $userId): array {
     $sql = "SELECT * FROM notifications WHERE user_id = ? AND is_read = 0 ORDER BY created_at DESC";
-    return db_query($sql, [$userId]);
+    return db_all($sql, [$userId]);
 }
 
 /**
@@ -493,8 +565,12 @@ function getUnreadNotifications(int $userId): array {
  */
 function markNotificationRead(int $notificationId): bool {
     $sql = "UPDATE notifications SET is_read = 1 WHERE id = ?";
-    return db_execute($sql, [$notificationId]);
+    return db_run($sql, [$notificationId]);
 }
+
+// ════════════════════════════════════════════════════════════════════════════
+//  SETTINGS FUNCTIONS
+// ════════════════════════════════════════════════════════════════════════════
 
 /**
  * Get system setting
@@ -516,5 +592,5 @@ function updateSetting(string $key, $value): bool {
     $sql = "INSERT INTO settings (setting_key, setting_value, updated_at) 
             VALUES (?, ?, NOW())
             ON DUPLICATE KEY UPDATE setting_value = ?, updated_at = NOW()";
-    return db_execute($sql, [$key, $value, $value]);
+    return db_run($sql, [$key, $value, $value]);
 }

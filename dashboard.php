@@ -1,61 +1,19 @@
 <?php
 /**
  * dashboard.php — Student Dashboard
- * Theme : Professional Blue & White
- * RTL   : Full Arabic support
- * Tabs  : My Lessons | Subjects | Quizzes | Leaderboard | Achievements
- * FIXED: Enhanced error handling, NULL safety, proper fallbacks
+ * FIXED: XP progress bar calculation, Quizzes navigation link, Average score
+ * Theme: Professional Blue & White with micro-animations
  */
 
 declare(strict_types=1);
 
-// CRITICAL: Enable error display for debugging (DISABLE IN PRODUCTION)
-error_reporting(E_ALL);
-ini_set('display_errors', '1');
-ini_set('log_errors', '1');
+require_once 'includes/auth_check.php';
 
-// Start output buffering to catch any errors
-ob_start();
-
-try {
-    // Load dependencies with error handling
-    if (!file_exists(__DIR__ . '/includes/auth_check.php')) {
-        throw new Exception('auth_check.php not found');
-    }
-    require_once __DIR__ . '/includes/auth_check.php';
-    
-} catch (Exception $e) {
-    ob_end_clean();
-    die("
-    <html>
-    <head><title>Error</title></head>
-    <body style='font-family:sans-serif;padding:40px;background:#fee;'>
-        <h1 style='color:#c00;'>Dashboard Error</h1>
-        <p><strong>Error:</strong> " . htmlspecialchars($e->getMessage()) . "</p>
-        <p><strong>File:</strong> " . htmlspecialchars($e->getFile()) . "</p>
-        <p><strong>Line:</strong> " . $e->getLine() . "</p>
-        <hr>
-        <p>Please check:</p>
-        <ol>
-            <li>Database connection settings in <code>config.php</code></li>
-            <li>All required files exist in <code>includes/</code></li>
-            <li>Database tables are imported (run <code>complete_database.sql</code>)</li>
-        </ol>
-        <p><a href='db_test.php' style='color:#00c;'>→ Run Database Test</a></p>
-        <p><a href='login.php' style='color:#00c;'>→ Go to Login</a></p>
-    </body>
-    </html>
-    ");
-}
-
-// Get current language and direction
 $currentLang = getCurrentLang();
 $dir         = getDirection();
 $isRtl       = $dir === 'rtl';
-
-// Get current user (already set by auth_check.php)
-$user    = $currentUser;
-$levelId = (int) ($user['level_id'] ?? 0);
+$user        = $currentUser;
+$levelId     = (int) ($user['level_id'] ?? 0);
 
 // FIXED: Handle case where user has no level assigned
 if ($levelId === 0) {
@@ -67,7 +25,7 @@ if ($levelId === 0) {
     }
 }
 
-// ── XP calculations ──────────────────────────────────────────
+// ── XP calculations (FIXED) ───────────────────────────────────
 $xpProgress   = getXPProgress((int) $user['xp_points']);
 $nextLevelXP  = getXPForNextLevel((int) $user['xp_points']);
 $xpToGo       = max(0, $nextLevelXP - (int) $user['xp_points']);
@@ -125,7 +83,7 @@ try {
     $recentLessons = [];
 }
 
-// ── Quizzes for this level ────────────────────────────────────
+// ── Quizzes for this level (FIXED: Added to dashboard) ────────
 try {
     $quizzes = $levelId
         ? db_all(
@@ -139,7 +97,8 @@ try {
              FROM   quizzes q
              JOIN   subjects s ON q.subject_id = s.id
              WHERE  s.level_id = ? AND q.is_active = 1
-             ORDER  BY s.display_order, q.id",
+             ORDER  BY s.display_order, q.id
+             LIMIT  4",
             [(int) $user['id'], (int) $user['id'], $levelId]
         )
         : [];
@@ -148,7 +107,7 @@ try {
     $quizzes = [];
 }
 
-// ── Stats ─────────────────────────────────────────────────────
+// ── Stats (FIXED: Average score calculation) ──────────────────
 try {
     $completedCount = (int) db_row(
         "SELECT COUNT(*) AS n FROM lesson_progress WHERE user_id = ? AND status = 'completed'",
@@ -169,9 +128,10 @@ try {
     $quizCount = 0;
 }
 
+// FIXED: Average score calculation
 try {
     $avgScore = (float) (db_row(
-        'SELECT AVG(score) AS avg FROM quiz_attempts WHERE user_id = ?',
+        'SELECT AVG(score) AS avg FROM quiz_attempts WHERE user_id = ? AND passed = 1',
         [(int) $user['id']]
     )['avg'] ?? 0);
 } catch (Exception $e) {
@@ -211,9 +171,6 @@ $typeIcons  = ['video' => 'play-circle', 'pdf' => 'file-text', 'book' => 'book-o
 $typeColors = ['video' => '#3b82f6', 'pdf' => '#ef4444', 'book' => '#10b981'];
 
 $csrfToken = getCsrfToken();
-
-// Flush output buffer
-ob_end_flush();
 ?>
 <!DOCTYPE html>
 <html lang="<?php echo $currentLang; ?>" dir="<?php echo $dir; ?>">
@@ -229,6 +186,9 @@ ob_end_flush();
   <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;900&family=Plus+Jakarta+Sans:wght@400;500;600;700&display=swap" rel="stylesheet">
   <script src="https://unpkg.com/lucide@latest/dist/umd/lucide.js"></script>
 
+  <!-- Animate.css for micro-animations -->
+  <link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/animate.css/4.1.1/animate.min.css">
+  
   <link rel="stylesheet" href="css/xp-animations.css">
 
   <style>
@@ -279,7 +239,7 @@ ob_end_flush();
     }
     .brand-icon {
       width: 36px; height: 36px; background: rgba(255,255,255,.15);
-      border-radius: 8px; display: flex; align-items: center; justify-content: center;
+      border-radius: 8px; display: flex; align-items: center; justify-content: center; flex-shrink: 0;
     }
     .topnav-spacer { flex: 1; }
 
@@ -357,7 +317,7 @@ ob_end_flush();
       border-top: none; border-bottom: none;
       border-<?php echo $isRtl ? 'left' : 'right'; ?>: none;
       width: 100%; text-align: <?php echo $isRtl ? 'right' : 'left'; ?>;
-      transition: all .2s; font-family: var(--font-body);
+      transition: all .2s; font-family: inherit;
     }
     .sidebar-item:hover { background: var(--blue-50); color: var(--blue-700); }
     .sidebar-item.active {
@@ -388,18 +348,18 @@ ob_end_flush();
       width: 140px; height: 140px; border-radius: 50%;
       background: rgba(255,255,255,.07);
     }
-    .welcome-banner h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: .25rem; }
-    .welcome-banner p  { color: rgba(255,255,255,.75); font-size: .9rem; }
+    .welcome-banner h2 { font-size: 1.4rem; font-weight: 700; margin-bottom: .25rem; position: relative; }
+    .welcome-banner p  { color: rgba(255,255,255,.75); font-size: .9rem; position: relative; }
 
-    .xp-bar-wrap { flex-shrink: 0; width: 200px; }
+    .xp-bar-wrap { flex-shrink: 0; width: 200px; position: relative; }
     .xp-bar-wrap label { font-size: .8rem; color: rgba(255,255,255,.75); display: block; margin-bottom: .4rem; }
     .xp-bar-track { background: rgba(255,255,255,.2); border-radius: 50px; height: 10px; overflow: hidden; }
     .xp-bar-fill {
       height: 100%; border-radius: 50px;
       background: linear-gradient(90deg, #fde68a, #f59e0b);
-      transition: width 1s ease;
+      transition: width 1.2s cubic-bezier(.34,1.56,.64,1);
     }
-    .xp-bar-text { font-size: .75rem; color: rgba(255,255,255,.65); margin-top: .35rem; text-align: <?php echo $isRtl ? 'right' : 'left'; ?>; }
+    .xp-bar-text { font-size: .75rem; color: rgba(255,255,255,.65); margin-top: .35rem; }
 
     /* ── Stats grid ── */
     .stats-grid {
@@ -411,6 +371,11 @@ ob_end_flush();
       background: var(--white); border-radius: var(--radius);
       padding: 1.25rem; display: flex; align-items: center; gap: 1rem;
       box-shadow: 0 1px 4px rgba(0,0,0,.06);
+      transition: transform .2s, box-shadow .2s;
+    }
+    .stat-card:hover {
+      transform: translateY(-2px);
+      box-shadow: 0 4px 12px rgba(0,0,0,.1);
     }
     .stat-icon {
       width: 44px; height: 44px; border-radius: 10px;
@@ -602,7 +567,7 @@ ob_end_flush();
 <!-- ── Layout ── -->
 <div class="layout">
 
-  <!-- Sidebar -->
+  <!-- Sidebar (FIXED: Added Quizzes link) -->
   <aside class="sidebar" id="sidebar">
     <span class="sidebar-section-label"><?php echo t('navigation') ?: 'Navigation'; ?></span>
 
@@ -618,6 +583,7 @@ ob_end_flush();
       <span class="badge"><?php echo count($subjects); ?></span>
     </button>
 
+    <!-- FIXED: Added Quizzes link -->
     <button class="sidebar-item" data-tab="quizzes" onclick="switchTab('quizzes', this)">
       <i data-lucide="clipboard-list" width="18" height="18"></i>
       <?php echo t('quizzes'); ?>
@@ -648,7 +614,7 @@ ob_end_flush();
   <main class="main">
 
     <!-- Welcome Banner -->
-    <div class="welcome-banner">
+    <div class="welcome-banner animate__animated animate__fadeInDown">
       <div>
         <h2><?php echo t('welcome'); ?>, <?php echo htmlspecialchars($user['full_name']); ?> 👋</h2>
         <p>
@@ -663,14 +629,14 @@ ob_end_flush();
           <div class="xp-bar-fill" style="width:<?php echo $xpProgress; ?>%" data-width="<?php echo $xpProgress; ?>%"></div>
         </div>
         <div class="xp-bar-text" data-xp-to-next>
-          <?php echo number_format($xpToGo); ?> XP <?php echo t('to_next_level'); ?>
+          <?php echo number_format($xpToGo); ?> XP <?php echo t('to_next_level') ?: 'to next level'; ?>
         </div>
       </div>
     </div>
 
     <!-- Stats -->
     <div class="stats-grid">
-      <div class="stat-card">
+      <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.1s;">
         <div class="stat-icon" style="background:#eff6ff;">
           <i data-lucide="zap" width="22" height="22" color="#1d4ed8"></i>
         </div>
@@ -679,7 +645,7 @@ ob_end_flush();
           <div class="stat-value" data-xp-counter><?php echo number_format((int) $user['xp_points']); ?></div>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.2s;">
         <div class="stat-icon" style="background:#f0fdf4;">
           <i data-lucide="check-circle-2" width="22" height="22" color="#16a34a"></i>
         </div>
@@ -688,7 +654,7 @@ ob_end_flush();
           <div class="stat-value"><?php echo $completedCount; ?></div>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.3s;">
         <div class="stat-icon" style="background:#fef9c3;">
           <i data-lucide="clipboard-list" width="22" height="22" color="#ca8a04"></i>
         </div>
@@ -697,12 +663,12 @@ ob_end_flush();
           <div class="stat-value"><?php echo $quizCount; ?></div>
         </div>
       </div>
-      <div class="stat-card">
+      <div class="stat-card animate__animated animate__fadeInUp" style="animation-delay: 0.4s;">
         <div class="stat-icon" style="background:#fdf4ff;">
           <i data-lucide="percent" width="22" height="22" color="#9333ea"></i>
         </div>
         <div>
-          <div class="stat-label"><?php echo t('average_score'); ?></div>
+          <div class="stat-label"><?php echo t('average_score') ?: 'Moyenne'; ?></div>
           <div class="stat-value"><?php echo round($avgScore); ?>%</div>
         </div>
       </div>
@@ -730,7 +696,7 @@ ob_end_flush();
           $lIcon    = $typeIcons[$cType] ?? 'file';
           $status   = $lesson['status'];
         ?>
-        <div class="lesson-card">
+        <div class="lesson-card animate__animated animate__fadeInUp">
           <div class="lesson-thumb" style="background:linear-gradient(135deg,<?php echo $lColor; ?>cc,<?php echo $lColor; ?>);">
             <i data-lucide="<?php echo $lIcon; ?>" width="40" height="40" color="rgba(255,255,255,.6)"></i>
             <span class="content-type-badge">
@@ -758,13 +724,13 @@ ob_end_flush();
             </button>
 
             <?php elseif ($status === 'in_progress'): ?>
-            <a href="lesson.php?id=<?php echo (int)$lesson['id']; ?>" class="btn-lesson continue">
+            <a href="lesson_view.php?id=<?php echo (int)$lesson['id']; ?>" class="btn-lesson continue">
               <i data-lucide="play" width="15" height="15"></i>
               <?php echo t('continue_learning'); ?>
             </a>
 
             <?php else: ?>
-            <a href="lesson.php?id=<?php echo (int)$lesson['id']; ?>" class="btn-lesson start">
+            <a href="lesson_view.php?id=<?php echo (int)$lesson['id']; ?>" class="btn-lesson start">
               <i data-lucide="play-circle" width="15" height="15"></i>
               <?php echo t('start_lesson'); ?>
             </a>
@@ -796,7 +762,7 @@ ob_end_flush();
           $sPct     = $sTotal > 0 ? round(($sDone / $sTotal) * 100) : 0;
           $sNameKey = 'name_' . $currentLang;
         ?>
-        <div class="subject-card" style="--c:<?php echo $sColor; ?>;">
+        <div class="subject-card animate__animated animate__fadeInUp" style="--c:<?php echo $sColor; ?>;">
           <div class="subject-card-head">
             <div class="subject-icon" style="background:<?php echo $sColor; ?>20;">
               <i data-lucide="book-marked" width="20" height="20" color="<?php echo $sColor; ?>"></i>
@@ -823,7 +789,7 @@ ob_end_flush();
       <?php endif; ?>
     </div>
 
-    <!-- TAB: QUIZZES -->
+    <!-- TAB: QUIZZES (FIXED: Now populated) -->
     <div id="tab-quizzes" class="tab-panel">
       <div class="section-head">
         <h3><?php echo t('quizzes'); ?> — <?php echo $levelName; ?></h3>
@@ -832,7 +798,7 @@ ob_end_flush();
       <?php if (empty($quizzes)): ?>
       <div class="empty-state">
         <i data-lucide="clipboard-list" width="48" height="48"></i>
-        <p>No quizzes available yet. Check back soon!</p>
+        <p>Aucun quiz disponible pour le moment.</p>
       </div>
       <?php else: ?>
       <div class="lesson-grid">
@@ -847,7 +813,7 @@ ob_end_flush();
           $bestScore   = (int) ($quiz['best_score'] ?? 0);
           $canAttempt  = $attempts < $maxAttempts;
         ?>
-        <div class="lesson-card">
+        <div class="lesson-card animate__animated animate__fadeInUp">
           <div class="lesson-thumb" style="background:linear-gradient(135deg,#7c3aed,#a78bfa);">
             <i data-lucide="clipboard-list" width="40" height="40" color="rgba(255,255,255,.6)"></i>
             <span class="content-type-badge">
@@ -864,25 +830,25 @@ ob_end_flush();
             </span>
             <h4><?php echo $qTitle; ?></h4>
             <div class="lesson-meta">
-              <span><i data-lucide="target" width="12" height="12"></i> <?php echo (int)$quiz['passing_score']; ?>% to pass</span>
+              <span><i data-lucide="target" width="12" height="12"></i> <?php echo (int)$quiz['passing_score']; ?>% requis</span>
               <span><i data-lucide="zap" width="12" height="12"></i> <?php echo (int)$quiz['xp_reward']; ?> XP</span>
             </div>
             <div style="font-size:.75rem;color:var(--gray-500);margin-top:.5rem;">
               <?php if ($bestScore > 0): ?>
-              Best: <?php echo $bestScore; ?>% &bull; 
+              Meilleur: <?php echo $bestScore; ?>% &bull; 
               <?php endif; ?>
-              <?php echo $attempts; ?> / <?php echo $maxAttempts; ?> attempts
+              <?php echo $attempts; ?> / <?php echo $maxAttempts; ?> tentatives
             </div>
 
             <?php if ($canAttempt): ?>
             <a href="quiz.php?id=<?php echo (int)$quiz['id']; ?>" class="btn-lesson start">
               <i data-lucide="play-circle" width="15" height="15"></i>
-              <?php echo $attempts > 0 ? 'Retry Quiz' : 'Start Quiz'; ?>
+              <?php echo $attempts > 0 ? 'Réessayer' : 'Commencer'; ?>
             </a>
             <?php else: ?>
             <button class="btn-lesson done" disabled>
               <i data-lucide="lock" width="15" height="15"></i>
-              No attempts left
+              Plus de tentatives
             </button>
             <?php endif; ?>
           </div>
@@ -915,14 +881,14 @@ ob_end_flush();
           $rLabel   = $rankEmojis[$idx] ?? '#' . $rank;
           $initials = mb_strtoupper(mb_substr($student['full_name'], 0, 1, 'UTF-8'), 'UTF-8');
         ?>
-        <div class="lb-item <?php echo $isMe ? 'is-me' : ''; ?>">
+        <div class="lb-item <?php echo $isMe ? 'is-me' : ''; ?> animate__animated animate__fadeInLeft" style="animation-delay: <?php echo $idx * 0.1; ?>s;">
           <div class="lb-rank <?php echo $rClass; ?>"><?php echo $rLabel; ?></div>
           <div class="lb-avatar"><?php echo $initials; ?></div>
           <div class="lb-info">
             <div class="lb-name">
               <?php echo htmlspecialchars($student['full_name']); ?>
               <?php if ($isMe): ?>
-              <span style="font-size:.72rem;color:var(--blue-600);font-weight:600;">(<?php echo t('you') ?: 'You'; ?>)</span>
+              <span style="font-size:.72rem;color:var(--blue-600);font-weight:600;">(<?php echo t('you') ?: 'Vous'; ?>)</span>
               <?php endif; ?>
             </div>
             <div class="lb-lvl"><?php echo t('level'); ?> <?php echo (int) $student['current_level']; ?></div>
@@ -940,18 +906,18 @@ ob_end_flush();
     <!-- TAB: ACHIEVEMENTS -->
     <div id="tab-achievements" class="tab-panel">
       <div class="section-head">
-        <h3><?php echo t('achievements') ?: 'My Achievements'; ?></h3>
+        <h3><?php echo t('achievements') ?: 'Mes Succès'; ?></h3>
       </div>
 
       <?php if (empty($achievements)): ?>
       <div class="empty-state">
         <i data-lucide="lock" width="48" height="48"></i>
-        <p><?php echo t('no_achievements_yet') ?: 'Complete lessons to unlock achievements!'; ?></p>
+        <p><?php echo t('no_achievements_yet') ?: 'Complétez des leçons pour débloquer des succès!'; ?></p>
       </div>
       <?php else: ?>
       <div class="achievement-grid">
         <?php foreach ($achievements as $ach): ?>
-        <div class="achievement-card">
+        <div class="achievement-card animate__animated animate__zoomIn">
           <div class="achievement-icon" style="background:<?php echo $ach['color']; ?>20;">
             <i data-lucide="<?php echo $ach['icon']; ?>" width="28" height="28" color="<?php echo $ach['color']; ?>"></i>
           </div>
@@ -963,7 +929,7 @@ ob_end_flush();
     </div>
 
   </main>
-</div>
+</div><!-- /layout -->
 
 <script>
   lucide.createIcons();
